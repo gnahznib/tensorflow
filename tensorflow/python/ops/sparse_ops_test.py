@@ -18,18 +18,28 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import test_util
+# Need array_grad to register gradient for Identity.
+from tensorflow.python.ops import array_grad  # pylint: disable=unused-import
+from tensorflow.python.ops import gen_sparse_ops
+from tensorflow.python.ops import gradient_checker_v2 as gradient_checker
+from tensorflow.python.ops import math_ops
+# Need sparse_grad to register gradient for SparseToDense.
+from tensorflow.python.ops import sparse_grad  # pylint: disable=unused-import
 from tensorflow.python.ops import sparse_ops
 from tensorflow.python.platform import googletest
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class SparseOpsTest(test_util.TensorFlowTestCase):
+class SparseOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
 
   def testSparseEye(self):
     def test_one(n, m, as_tensors):
@@ -46,6 +56,15 @@ class SparseOpsTest(test_util.TensorFlowTestCase):
         # Test with n and m as both constants and tensors.
         test_one(n, m, True)
         test_one(n, m, False)
+
+  def testDenseFromConstantToSparse(self):
+    expected_constant = np.reshape(np.arange(24, dtype=np.int64), (3, 4, 2))
+    tensor = constant_op.constant(expected_constant)
+    sparse = sparse_ops.from_dense(tensor)
+    dense = sparse_ops.sparse_to_dense(sparse.indices, sparse.dense_shape,
+                                       sparse.values)
+    constant = self.evaluate(dense)
+    self.assertAllEqual(expected_constant, constant)
 
   def testSparseExpandDims(self):
     for rank in range(1, 4):
@@ -76,6 +95,99 @@ class SparseOpsTest(test_util.TensorFlowTestCase):
           s = sparse_ops.sparse_expand_dims(before_t, axis)
           d = sparse_ops.sparse_to_dense(s.indices, s.dense_shape, s.values)
           self.assertAllEqual(self.evaluate(d), expected_after)
+
+  @parameterized.parameters([
+      (math_ops.abs, [1.0, -1.0, 3.0, -4.0], [1.0, 1.0, 3.0, 4.0]),
+      (math_ops.negative, [1.0, -1.0, 3.0, -4.0], [-1.0, 1.0, -3.0, 4.0]),
+      (math_ops.sign, [3.0, -2.0, 0.0, -4.0], [1.0, -1.0, 0.0, -1.0]),
+      (math_ops.square, [1.0, -1.0, 3.0, -4.0], [1.0, 1.0, 9.0, 16.0]),
+  ])
+  def testUnarySparseDispatch(self, op, values, expected):
+    st = sparse_tensor.SparseTensor(
+        indices=[[0, 0], [0, 1], [2, 0], [2, 4]],
+        values=values,
+        dense_shape=[3, 6])
+    result = op(st)
+    result_value = self.evaluate(result)
+    self.assertAllEqual(result_value.indices, st.indices)
+    self.assertAllEqual(result_value.values, expected)
+    self.assertAllEqual(result_value.dense_shape, st.dense_shape)
+
+  def testSparseToDenseGradient(self):
+
+    def f(sparse_values, default_value):
+      st = sparse_tensor.SparseTensor(
+          indices=[[0, 3, 6], [1, 4, 7], [2, 5, 8]],
+          values=sparse_values,
+          dense_shape=[3, 6, 9])
+      return sparse_ops.sparse_tensor_to_dense(st, default_value)
+
+    grads = gradient_checker.compute_gradient(
+        f, [constant_op.constant([1.0, 2.0, 3.0]),
+            constant_op.constant(0.0)])
+    epsilon = 1e-4
+    self.assertLess(gradient_checker.max_error(*grads), epsilon)
+
+  def testSparseTensorToDenseString(self):
+    sp = sparse_tensor.SparseTensor(
+        indices=[[0, 0], [1, 2]], values=['a', 'b'], dense_shape=[2, 3])
+    dense = sparse_ops.sparse_tensor_to_dense(sp)
+    expected_dense = [[b'a', b'', b''], [b'', b'', b'b']]
+    result_dense = self.evaluate(dense)
+    self.assertAllEqual(expected_dense, result_dense)
+
+
+@test_util.run_all_in_graph_and_eager_modes
+class RawOpsTest(test_util.TensorFlowTestCase, parameterized.TestCase):
+
+  def testSparseFillEmptyRowsGrad(self):
+    reverse_index_map = [2, 1]
+    grad_values = [0, 1, 2, 3]
+    d_values, d_default_value = self.evaluate(
+        gen_sparse_ops.SparseFillEmptyRowsGrad(
+            reverse_index_map=reverse_index_map, grad_values=grad_values))
+    self.assertAllEqual([2, 1], d_values)
+    self.assertEqual(3, d_default_value)
+
+  def testSparseFillEmptyRowsGradNegativeIndexMapValue(self):
+    reverse_index_map = [2, -1]
+    grad_values = [0, 1, 2, 3]
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        r'Elements in reverse index must be in \[0, 4\)'):
+      self.evaluate(
+          gen_sparse_ops.SparseFillEmptyRowsGrad(
+              reverse_index_map=reverse_index_map, grad_values=grad_values))
+
+  def testSparseFillEmptyRowsGradLargeIndexMapValue(self):
+    reverse_index_map = [2, 10]
+    grad_values = [0, 1, 2, 3]
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        r'Elements in reverse index must be in \[0, 4\)'):
+      self.evaluate(
+          gen_sparse_ops.SparseFillEmptyRowsGrad(
+              reverse_index_map=reverse_index_map, grad_values=grad_values))
+
+  def testSparseFillEmptyRowsGradMatrix(self):
+    reverse_index_map = [0, 1]
+    grad_values = [[0, 1], [2, 3]]
+    # Note: Eager mode and graph mode throw different errors here. Graph mode
+    # will fail with a ValueError from the shape checking logic, while Eager
+    # will fail with an InvalidArgumentError from the kernel itself.
+    if context.executing_eagerly():
+      with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                  r'grad_values must be a vector'):
+        self.evaluate(
+            gen_sparse_ops.SparseFillEmptyRowsGrad(
+                reverse_index_map=reverse_index_map, grad_values=grad_values))
+    else:
+      with self.assertRaisesRegex(ValueError,
+                                  r'Shape must be rank 1 but is rank 2'):
+        self.evaluate(
+            gen_sparse_ops.SparseFillEmptyRowsGrad(
+                reverse_index_map=reverse_index_map, grad_values=grad_values))
+
 
 if __name__ == '__main__':
   googletest.main()

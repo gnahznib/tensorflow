@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/optimizers/data/vectorization_utils.h"
+#include "absl/container/flat_hash_set.h"
 #include "tensorflow/core/grappler/optimizers/data/vectorization/vectorizer_registry.h"
 
 #include "absl/strings/str_join.h"
@@ -45,7 +46,7 @@ namespace {
 // Describes a tensor with its operation Node and output position
 typedef std::pair<Node*, int> TensorDesc;
 
-const char* const kRetValOp = "_Retval";
+constexpr char kRetValOp[] = "_Retval";
 
 void ReplaceEdgeSources(const TensorDesc& old_src, const TensorDesc& new_src,
                         Graph* graph) {
@@ -64,9 +65,18 @@ void ReplaceEdgeSources(const TensorDesc& old_src, const TensorDesc& new_src,
   }
 }
 
+// Update node attrs to keep its properties consistent with the function
+void UpdateMapDefunAttrs(FunctionBody* map_defun_fn, Node* map_defun_node) {
+  map_defun_node->AddAttr("output_types", map_defun_fn->ret_types);
+
+  // TODO(rachelim): Propagate precise shapes if they're known, which may enable
+  // subsequent optimizations.
+  map_defun_node->AddAttr("output_shapes", std::vector<PartialTensorShape>(
+                                               map_defun_fn->ret_types.size()));
+}
+
 Status AddMapDefunOutput(FunctionBody* map_defun_fn, Node* map_defun_node,
                          const TensorDesc& output) {
-  // Note that we don't update MapDefun attrs as we go, only when we are done
   DataType type = output.first->output_type(output.second);
   int index = map_defun_fn->ret_nodes.size();
 
@@ -83,13 +93,13 @@ Status AddMapDefunOutput(FunctionBody* map_defun_fn, Node* map_defun_node,
   map_defun_fn->graph->AddEdge(output.first, output.second, ret_node, 0);
   map_defun_fn->ret_nodes.push_back(ret_node);
   map_defun_fn->ret_types.push_back(type);
+  UpdateMapDefunAttrs(map_defun_fn, map_defun_node);
 
   return s;
 }
 
 void RemoveMapDefunOutput(int output_position, Graph* outer_scope,
                           FunctionBody* map_defun_fn, Node* map_defun_node) {
-  // Note that we don't update MapDefun attrs as we go, only when we are done
   DCHECK_LT(output_position, map_defun_fn->ret_nodes.size())
       << "Trying to remove output that doesn't exist. Output number: "
       << output_position;
@@ -102,6 +112,7 @@ void RemoveMapDefunOutput(int output_position, Graph* outer_scope,
                                 output_position);
   map_defun_fn->ret_types.erase(map_defun_fn->ret_types.begin() +
                                 output_position);
+  UpdateMapDefunAttrs(map_defun_fn, map_defun_node);
 
   // Renumber the nodes and edges that come after
   for (int i = 0; i < num_later_outputs; ++i) {
@@ -119,6 +130,7 @@ void RemoveMapDefunOutput(int output_position, Graph* outer_scope,
 // This class transforms the input FunctionDefs into their corresponding
 // Graph objects and works on the graphs directly, then converts them back
 // to FunctionDefs when GetResult is called.
+// TODO(rachelim): Move this to its own header.
 class Vectorization {
  public:
   explicit Vectorization(FunctionDefLibrary* lib)
@@ -171,18 +183,25 @@ class Vectorization {
   Status StackTensor(WrappedTensor* unstacked, TensorDesc* result);
 
   // Recursively looks for unstacked nodes in the `map_defun_fn_` graph by
-  // doing a depth-first search from the ret nodes. Lifts nodes that are
-  // unstacked (i.e. don't derive from arg nodes) into `outer_scope_` directly
-  // and add mappings to `conversion_map_`.
-  Status AddUnstackedNodeMappings();
+  // doing a depth-first search from the ret nodes. Lifts tensors that are
+  // unstacked (i.e. don't derive from arg tensors) into `outer_scope_` directly
+  // and adds mappings to `conversion_map_`.
+  // Note that this function may have false negatives, i.e. not
+  // add mappings for some tensors that are unstacked. This may happen in the
+  // following cases: 1) a vectorized op produces unstacked outputs from stacked
+  // inputs (e.g. the vectorized "Shape" op), 2) the tensors are in a cycle, or
+  // 3) the unstacked op could not be lifted into `outer_scope`.
+  Status AddUnstackedTensorMappings();
 
-  // Recursive helper for `AddUnstackedNodeMappings`, returns true if tensor
-  // is unstacked.
-  bool AddUnstackedNodeMappingsHelper(TensorDesc&& tensor, Status* status);
+  // Recursive helper for `AddUnstackedTensorMappings`. If an op node is
+  // unstacked, lifts its output tensors into `outer_scope`, adding the mappings
+  // to `conversion_map`. Returns true if the unstacked mappings were added.
+  bool AddUnstackedTensorMappingsHelper(
+      TensorDesc&& tensor, absl::flat_hash_set<const Edge*>* visited);
 
-  // Add mappings from `map_defun_fn_` arg nodes to `map_defun_node_` input
-  // nodes to `conversion_map_`.
-  Status AddArgNodeMappings();
+  // Add mappings from `map_defun_fn_` arg tensors to `map_defun_node_` input
+  // tensors to `conversion_map_`.
+  Status AddArgTensorMappings();
 
   // Maps a tensor to the corresponding WrappedTensor. For example,
   // {"Cast" Node*, 0} -> WrappedTensor({"Vectorize/Cast" Node*, 0}, true)
@@ -253,8 +272,13 @@ Status Vectorization::AddConversionMapping(Node* op_node) {
     }
   }
 
-  TF_RETURN_IF_ERROR(vectorizer->Vectorize(*op_node, outer_scope_.get(),
-                                           std::move(inputs), &outputs));
+  Status s = vectorizer->Vectorize(*op_node, outer_scope_.get(),
+                                   std::move(inputs), &outputs);
+  if (!s.ok()) {
+    VLOG(2) << "Vectorizer for op \"" << op_node->type_string()
+            << "\" failed with error: " << s;
+    return s;
+  }
 
   if (op_node->num_outputs() != outputs.size()) {
     return errors::Internal(
@@ -337,13 +361,6 @@ void Vectorization::VectorizeHelper() {
   // need the MapDefun node and can delete it.
   if (map_defun_fn_->ret_nodes.empty()) {
     outer_scope_->RemoveNode(map_defun_node_);
-  } else {
-    // Update MapDefun node attrs accordingly
-    DCHECK_EQ(map_defun_fn_->ret_types.size(), map_defun_fn_->ret_nodes.size());
-    map_defun_node_->AddAttr(
-        "output_shapes",
-        std::vector<PartialTensorShape>(map_defun_fn_->ret_types.size()));
-    map_defun_node_->AddAttr("output_types", map_defun_fn_->ret_types);
   }
 }
 
@@ -360,22 +377,15 @@ Status Vectorization::Initialize(const FunctionDef& outer_scope,
                             " in function library.");
   }
 
-  auto get_func_sig = [this](const string& op, const OpDef** sig) {
-    return this->lib_def_.LookUpOpDef(op, sig);
-  };
-
-  FunctionBody* outer_fn;
-  TF_RETURN_IF_ERROR(FunctionDefToBodyHelper(outer_scope, {}, &lib_def_,
-                                             get_func_sig, &outer_fn));
+  std::unique_ptr<FunctionBody> outer_fn;
+  TF_RETURN_IF_ERROR(
+      FunctionDefToBodyHelper(outer_scope, {}, &lib_def_, &outer_fn));
   // We don't need outer_fn, just the graph
   outer_scope_.reset(outer_fn->graph);
   outer_fn->graph = nullptr;
-  delete outer_fn;
 
-  FunctionBody* tmp;
-  TF_RETURN_IF_ERROR(FunctionDefToBodyHelper(*map_defun_fn, {}, &lib_def_,
-                                             get_func_sig, &tmp));
-  map_defun_fn_.reset(tmp);
+  TF_RETURN_IF_ERROR(
+      FunctionDefToBodyHelper(*map_defun_fn, {}, &lib_def_, &map_defun_fn_));
 
   // Find the MapDefun node in outer_scope_
   int node_id = graph_utils::GetFirstElementIndexWithPredicate(
@@ -387,9 +397,8 @@ Status Vectorization::Initialize(const FunctionDef& outer_scope,
   }
   map_defun_node_ = outer_scope_->FindNodeId(node_id);
 
-  TF_RETURN_IF_ERROR(AddArgNodeMappings());
-
-  TF_RETURN_IF_ERROR(AddUnstackedNodeMappings());
+  TF_RETURN_IF_ERROR(AddArgTensorMappings());
+  TF_RETURN_IF_ERROR(AddUnstackedTensorMappings());
   loop_len_node_ = nullptr;
 
   return Status::OK();
@@ -399,6 +408,10 @@ Status Vectorization::Initialize(const FunctionDef& outer_scope,
 // NodeBuilder
 Status Vectorization::StackTensor(WrappedTensor* unstacked,
                                   TensorDesc* result) {
+  if (unstacked->node->output_type(unstacked->output_index) == DT_VARIANT) {
+    // TODO(b/124069171): "ExpandDims" doesn't work with Variant tensors.
+    return errors::Unimplemented("Cannot stack tensor with Variant type.");
+  }
   // Note that all these nodes are necessary as the size of the batch may not be
   // constant.
   if (unstacked->stacked) {
@@ -480,23 +493,43 @@ Status Vectorization::StackTensor(WrappedTensor* unstacked,
   return Status::OK();
 }
 
-Status Vectorization::AddArgNodeMappings() {
-  for (auto arg_node : map_defun_fn_->arg_nodes) {
+Status Vectorization::AddArgTensorMappings() {
+  // Note that inputs to map_defun_fn_ are either regular arguments (for which
+  // the operations are mapped across their 0th dimension) or captured inputs
+  // (for which the operations apply to the argument wholesale).
+  int num_args =
+      map_defun_node_->attrs().Find("Targuments")->list().type_size();
+
+  auto add_conversion = [this](Node* arg_node, bool stacked) {
     Node* input_node;
     TF_RETURN_IF_ERROR(map_defun_node_->input_node(
         arg_node->attrs().Find("index")->i(), &input_node));
 
-    conversion_map_.insert({{arg_node, 0}, {input_node, 0, true}});
+    conversion_map_.insert({{arg_node, 0}, {input_node, 0, stacked}});
 
     // Control inputs
     conversion_map_.insert({{arg_node, Graph::kControlSlot},
-                            {input_node, Graph::kControlSlot, true}});
+                            {input_node, Graph::kControlSlot, stacked}});
+
+    return Status::OK();
+  };
+
+  // Regular arguments
+  for (int i = 0; i < num_args; ++i) {
+    TF_RETURN_IF_ERROR(add_conversion(map_defun_fn_->arg_nodes[i], true));
   }
+
+  // Captured inputs. These are applied (without slicing) to every iteration of
+  // the map function, hence are mapped to unstacked nodes.
+  for (int i = num_args; i < map_defun_fn_->arg_nodes.size(); ++i) {
+    TF_RETURN_IF_ERROR(add_conversion(map_defun_fn_->arg_nodes[i], false));
+  }
+
   return Status::OK();
 }
 
-bool Vectorization::AddUnstackedNodeMappingsHelper(TensorDesc&& tensor,
-                                                   Status* status) {
+bool Vectorization::AddUnstackedTensorMappingsHelper(
+    TensorDesc&& tensor, absl::flat_hash_set<const Edge*>* visited) {
   if (auto found = gtl::FindOrNull(conversion_map_, tensor)) {
     return !found->stacked;
   }
@@ -508,14 +541,22 @@ bool Vectorization::AddUnstackedNodeMappingsHelper(TensorDesc&& tensor,
   }
 
   bool is_unstacked = true;
-  for (auto edge : tensor.first->in_edges()) {
+  for (const auto& edge : tensor.first->in_edges()) {
     // Ignore Source nodes. Note that these are also ignored in the
     // GraphToFunctionDef conversion.
     if (edge->src()->IsSource()) continue;
 
+    if (visited->find(edge) != visited->end()) {
+      // If we've visited this edge already, we're in a cycle. In this case, we
+      // are conservative and don't mark the node as unstacked.
+      is_unstacked = false;
+      continue;
+    }
+    visited->insert(edge);
+
     // A node is unstacked if all of its inputs are unstacked
-    is_unstacked &= AddUnstackedNodeMappingsHelper(
-        {edge->src(), edge->src_output()}, status);
+    is_unstacked &= AddUnstackedTensorMappingsHelper(
+        {edge->src(), edge->src_output()}, visited);
   }
 
   if (!is_unstacked) {
@@ -525,11 +566,12 @@ bool Vectorization::AddUnstackedNodeMappingsHelper(TensorDesc&& tensor,
   // If the node is unstacked, we copy it into outer_scope_ and
   // add it to the map. Note that we don't clean up the nodes that are copied
   // in map_defun_fn_, and rely on them being pruned out later.
-  Node* node = outer_scope_->AddNode(tensor.first->def(), status);
-  if (!status->ok()) return true;
+  Status status;
+  Node* node = outer_scope_->AddNode(tensor.first->def(), &status);
+  if (!status.ok()) return false;
 
   // Add input edges to nodes that should already have been lifted.
-  for (auto edge : tensor.first->in_edges()) {
+  for (const auto& edge : tensor.first->in_edges()) {
     // Ignore Source nodes. Note that these are also ignored in the
     // GraphToFunctionDef conversion.
     if (edge->src()->IsSource()) continue;
@@ -539,9 +581,7 @@ bool Vectorization::AddUnstackedNodeMappingsHelper(TensorDesc&& tensor,
       outer_scope_->AddEdge(found->node, found->output_index, node,
                             edge->dst_input());
     } else {
-      status->Update(errors::Internal(
-          "Could not find input conversion even though we did depth first "
-          "conversion."));
+      return false;
     }
   }
 
@@ -555,14 +595,13 @@ bool Vectorization::AddUnstackedNodeMappingsHelper(TensorDesc&& tensor,
   return true;
 }
 
-Status Vectorization::AddUnstackedNodeMappings() {
-  SetVector<Node*> unstacked_nodes;
-  Status s;
+Status Vectorization::AddUnstackedTensorMappings() {
+  absl::flat_hash_set<const Edge*> visited;
   for (const auto& ret_node : map_defun_fn_->ret_nodes) {
     const Edge* in_edge = nullptr;
     TF_RETURN_IF_ERROR(ret_node->input_edge(0, &in_edge));
-    AddUnstackedNodeMappingsHelper({in_edge->src(), in_edge->src_output()}, &s);
-    TF_RETURN_IF_ERROR(s);
+    AddUnstackedTensorMappingsHelper({in_edge->src(), in_edge->src_output()},
+                                     &visited);
   }
   return Status::OK();
 }
@@ -601,6 +640,6 @@ Status VectorizeMapDefun(const FunctionDef& outer_scope,
   return Vectorization(lib).Vectorize(outer_scope, map_defun_node, result);
 }
 
-}  // end namespace vectorization_utils
-}  // end namespace grappler
-}  // end namespace tensorflow
+}  // namespace vectorization_utils
+}  // namespace grappler
+}  // namespace tensorflow
