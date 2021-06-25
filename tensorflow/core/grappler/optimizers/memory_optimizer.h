@@ -16,6 +16,9 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_MEMORY_OPTIMIZER_H_
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_MEMORY_OPTIMIZER_H_
 
+#include <string>
+#include "tensorflow/core/grappler/clusters/cluster.h"
+#include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
@@ -39,11 +42,10 @@ class MemoryOptimizer : public GraphOptimizer {
 
   string name() const override { return "memory_optimizer"; };
 
+  bool UsesFunctionLibrary() const override { return false; }
+
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* pruned_graph) override;
-
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& pruned_graph, double result) override;
 
  private:
   RewriterConfig::MemOptType optimization_level_;

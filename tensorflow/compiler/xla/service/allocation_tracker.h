@@ -65,19 +65,19 @@ class AllocationTracker {
   // replica, or provide an error status to say whether any of those buffers
   // were not found (or found, but found deallocated).
   StatusOr<std::vector<const ShapedBuffer*>> Resolve(
-      const GlobalDataHandle& data);
+      const GlobalDataHandle& data) const;
 
   // Resolves a handle from an XLA client and replica id to a shaped buffer, or
   // provide an error status to say whether it was not found (or found, but
   // found deallocated).
   StatusOr<const ShapedBuffer*> ResolveForReplica(const GlobalDataHandle& data,
-                                                  int replica_id);
+                                                  int replica_id) const;
 
  private:
   // Data structure encapsulating single memory allocation on the device.
   struct Allocation {
     // The pointer to this allocation.
-    OwningDeviceMemory device_memory;
+    se::OwningDeviceMemory device_memory;
 
     // This is the number of times this memory allocation is referred to by
     // registered data handles.
@@ -87,7 +87,7 @@ class AllocationTracker {
   // Internal helper which resolves the given GlobalDataHandle to a
   // list of ScopedShapedBuffers.
   StatusOr<std::vector<const ShapedBuffer*>> ResolveInternal(
-      const GlobalDataHandle& data) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+      const GlobalDataHandle& data) const TF_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Internal helper which registers a vector of shaped buffers, one per
   // replica.  ShapedBufferTy is either ScopedShapedBuffer or ShapedBuffer.  If
@@ -96,24 +96,25 @@ class AllocationTracker {
   template <typename ShapedBufferTy>
   StatusOr<GlobalDataHandle> RegisterInternal(
       std::vector<ShapedBufferTy> replicated_buffers, const string& tag)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+      TF_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Adds the given device address to the allocation tracker, or if it already
   // exists, then increment its reference count.
   void AddAllocationOrIncrementRefCount(se::DeviceMemoryBase device_memory,
                                         int device_ordinal)
-      EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+      TF_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // Decrements the reference count of the given device memory. Then, if it is
   // zero, deallocate the memory.
   Status DecrementRefCount(se::DeviceMemoryBase device_memory,
-                           int device_ordinal) EXCLUSIVE_LOCKS_REQUIRED(mutex_);
+                           int device_ordinal)
+      TF_EXCLUSIVE_LOCKS_REQUIRED(mutex_);
 
   // A map from device memory opaque value to allocation. One such map is
   // maintained per device ordinal.
   using AllocationMap = absl::flat_hash_map<const void*, Allocation>;
 
-  tensorflow::mutex mutex_;
+  mutable tensorflow::mutex mutex_;
 
   // Backend to use with this tracker. The backend supplies the memory allocator
   // to use when deallocating memory.
@@ -121,11 +122,11 @@ class AllocationTracker {
 
   // The next handle to assign to an allocation, guarded by the same mutex as
   // the mapping as they'll be mutated at the same time.
-  int64 next_handle_ GUARDED_BY(mutex_);
+  int64 next_handle_ TF_GUARDED_BY(mutex_);
 
   // A map from device ordinal to AllocationMap.
   absl::flat_hash_map<int, AllocationMap> opaque_to_allocation_map_
-      GUARDED_BY(mutex_);
+      TF_GUARDED_BY(mutex_);
 
   // A map from data handle to a vector of shaped buffers that represent the
   // buffers for different replicas.
@@ -145,7 +146,7 @@ class AllocationTracker {
   // free'd when both the view *and* the original tuple are Unregistered.  This
   // refcounting is managed in opaque_to_allocation_map_.
   absl::flat_hash_map<int64, std::vector<std::unique_ptr<ShapedBuffer>>>
-      handle_to_shaped_buffers_ GUARDED_BY(mutex_);
+      handle_to_shaped_buffers_ TF_GUARDED_BY(mutex_);
 
   TF_DISALLOW_COPY_AND_ASSIGN(AllocationTracker);
 };

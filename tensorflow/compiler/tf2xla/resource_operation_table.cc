@@ -53,10 +53,12 @@ CreateResourceOpInfoMap() {
   add("AssignAddVariableOp"                  , kReadWrite, kVariable);
   add("AssignSubVariableOp"                  , kReadWrite, kVariable);
   add("AssignVariableOp"                     , kWrite,     kVariable);
+  add("CollectiveReduceV2"                   , kRead,      kVariable);
   add("ReadVariableOp"                       , kRead,      kVariable);
   add("ResourceApplyAdaMax"                  , kReadWrite, kVariable);
   add("ResourceApplyAdadelta"                , kReadWrite, kVariable);
   add("ResourceApplyAdagrad"                 , kReadWrite, kVariable);
+  add("ResourceApplyAdagradV2"               , kReadWrite, kVariable),
   add("ResourceApplyAdagradDA"               , kReadWrite, kVariable);
   add("ResourceApplyAdam"                    , kReadWrite, kVariable);
   add("ResourceApplyAddSign"                 , kReadWrite, kVariable);
@@ -65,6 +67,7 @@ CreateResourceOpInfoMap() {
   add("ResourceApplyFtrlV2"                  , kReadWrite, kVariable);
   add("ResourceApplyGradientDescent"         , kReadWrite, kVariable);
   add("ResourceApplyMomentum"                , kReadWrite, kVariable);
+  add("ResourceApplyKerasMomentum"           , kReadWrite, kVariable);
   add("ResourceApplyPowerSign"               , kReadWrite, kVariable);
   add("ResourceApplyProximalAdagrad"         , kReadWrite, kVariable);
   add("ResourceApplyProximalGradientDescent" , kReadWrite, kVariable);
@@ -76,10 +79,18 @@ CreateResourceOpInfoMap() {
   add("ResourceScatterMin"                   , kReadWrite, kVariable);
   add("ResourceScatterMul"                   , kReadWrite, kVariable);
   add("ResourceScatterNdAdd"                 , kReadWrite, kVariable);
+  add("ResourceScatterNdSub"                 , kReadWrite, kVariable);
   add("ResourceScatterNdUpdate"              , kReadWrite, kVariable);
   add("ResourceScatterSub"                   , kReadWrite, kVariable);
   add("ResourceScatterUpdate"                , kReadWrite, kVariable);
   add("ResourceStridedSliceAssign"           , kReadWrite, kVariable);
+  add("RngReadAndSkip"                       , kReadWrite, kVariable);
+  add("RngSkip"                              , kReadWrite, kVariable);
+  add("StatefulStandardNormalV2"             , kReadWrite, kVariable);
+  add("StatefulTruncatedNormal"              , kReadWrite, kVariable);
+  add("StatefulUniform"                      , kReadWrite, kVariable);
+  add("StatefulUniformFullInt"               , kReadWrite, kVariable);
+  add("StatefulUniformInt"                   , kReadWrite, kVariable);
   add("VarIsInitializedOp"                   , kRead,      kVariable);
   add("VariableShape"                        , kRead,      kVariable);
 

@@ -13,14 +13,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/compiler/xla/service/gpu/gpu_hlo_schedule.h"
+
 #include <deque>
 #include <memory>
 #include <unordered_map>
 
-#include "tensorflow/compiler/xla/service/gpu/gpu_hlo_schedule.h"
-
 #include "absl/memory/memory.h"
 #include "tensorflow/compiler/xla/service/buffer_value.h"
+#include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_memory_scheduler.h"
 #include "tensorflow/compiler/xla/service/hlo_reachability.h"
 #include "tensorflow/compiler/xla/service/hlo_schedule.h"
@@ -37,12 +38,12 @@ class GpuHloOrdering : public PredecessorHloOrdering {
  public:
   GpuHloOrdering(const HloModule* module,
                  const StreamAssignment& stream_assignment,
-                 const std::vector<const HloInstruction*>& thunk_launch_order);
+                 const std::vector<HloInstruction*>& thunk_launch_order);
   ~GpuHloOrdering() override = default;
 
   // Only the entry computation can possibly be sequentially ordered, and only
   // if we've assigned all instructions to a single stream.
-  const std::vector<const HloInstruction*>* SequentialOrder(
+  const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const override {
     return &computation == module_->entry_computation() ? entry_sequence_.get()
                                                         : nullptr;
@@ -51,17 +52,17 @@ class GpuHloOrdering : public PredecessorHloOrdering {
   string ToString() const override { return ToStringHelper("GpuHloOrdering"); }
 
  private:
-  std::unique_ptr<std::vector<const HloInstruction*>> entry_sequence_;
+  std::unique_ptr<HloInstructionSequence> entry_sequence_;
 };
 
 GpuHloOrdering::GpuHloOrdering(
     const HloModule* module, const StreamAssignment& stream_assignment,
-    const std::vector<const HloInstruction*>& thunk_launch_order)
+    const std::vector<HloInstruction*>& thunk_launch_order)
     : PredecessorHloOrdering(module) {
   // The entry computation has a total order when there's only one stream.
   if (stream_assignment.StreamCount() == 1) {
-    entry_sequence_ = absl::make_unique<std::vector<const HloInstruction*>>(
-        thunk_launch_order);
+    entry_sequence_ =
+        absl::make_unique<HloInstructionSequence>(thunk_launch_order);
   }
 
   // The ordering of instructions for the entry computation is determined by the
@@ -124,7 +125,8 @@ GpuHloOrdering::GpuHloOrdering(
   for (auto* computation : module->computations()) {
     if (computation != module->entry_computation() &&
         !computation->IsFusionComputation()) {
-      predecessors_.emplace(computation, computation->ComputeReachability());
+      predecessors_.emplace(computation,
+                            HloReachabilityMap::Build(computation));
     }
   }
 }
@@ -149,7 +151,7 @@ GpuHloOrdering::GpuHloOrdering(
 // However, if the total order is A,B,D,C,E, then C and E can run
 // concurrently.
 void BFSLaunchOrder(const HloComputation* computation,
-                    std::vector<const HloInstruction*>* launch_order) {
+                    std::vector<HloInstruction*>* launch_order) {
   // This topological sort uses two data structures:
   // 1. `incoming_edge_count` which keeps track of the number of incoming
   // edges to each HLO;
@@ -157,9 +159,9 @@ void BFSLaunchOrder(const HloComputation* computation,
   //
   // The sorting algorithm repeatedly pops the top from the queue and deletes
   // that HLO from the graph, making more HLOs incoming-edge free.
-  std::deque<const HloInstruction*> queue;
+  std::deque<HloInstruction*> queue;
   std::unordered_map<const HloInstruction*, int64> incoming_edge_count;
-  for (const auto& hlo : computation->instructions()) {
+  for (auto* hlo : computation->instructions()) {
     if (hlo->operand_count() == 0) {
       queue.push_back(hlo);
     } else {
@@ -171,10 +173,10 @@ void BFSLaunchOrder(const HloComputation* computation,
   }
 
   while (!queue.empty()) {
-    const HloInstruction* x = queue.front();
+    HloInstruction* x = queue.front();
     queue.pop_front();
     launch_order->push_back(x);
-    for (const HloInstruction* y : x->users()) {
+    for (HloInstruction* y : x->users()) {
       --incoming_edge_count[y];
       if (incoming_edge_count[y] == 0) {
         queue.push_back(y);
@@ -183,35 +185,162 @@ void BFSLaunchOrder(const HloComputation* computation,
   }
 }
 
+bool ShouldScheduleAsEarlyAsPossible(const HloInstruction& instr) {
+  switch (instr.opcode()) {
+    case HloOpcode::kAllReduceStart:
+      return true;
+    case HloOpcode::kCustomCall:
+      return static_cast<const HloCustomCallInstruction&>(instr)
+                 .custom_call_schedule() ==
+             CustomCallSchedule::SCHEDULE_EARLIEST;
+    default:
+      return false;
+  }
+}
+
+bool ShouldScheduleSuccessor(
+    const HloInstruction& sussessor,
+    const std::function<bool(const HloInstruction*)>& is_scheduled) {
+  return ShouldScheduleAsEarlyAsPossible(sussessor) &&
+         absl::c_all_of(sussessor.operands(), is_scheduled) &&
+         absl::c_all_of(sussessor.control_predecessors(), is_scheduled);
+}
+
+bool ShouldScheduleAsLateAsPossible(const HloInstruction& instr) {
+  switch (instr.opcode()) {
+    case HloOpcode::kAllReduceDone:
+      return true;
+    case HloOpcode::kCustomCall:
+      return static_cast<const HloCustomCallInstruction&>(instr)
+                 .custom_call_schedule() == CustomCallSchedule::SCHEDULE_LATEST;
+    default:
+      return false;
+  }
+}
+
+bool ShouldSchedulePredecessor(
+    const HloInstruction& predecessor,
+    const std::function<bool(const HloInstruction*)>& is_scheduled) {
+  return ShouldScheduleAsLateAsPossible(predecessor) &&
+         absl::c_all_of(predecessor.users(), is_scheduled) &&
+         absl::c_all_of(predecessor.control_successors(), is_scheduled);
+}
+
+// Schedules certain ops as early or late as possible. This supports a
+// custom-call use case, where a logical operation is lowered into two HLOs
+// (e.g., PerformX and PerformXDone). We utilize this mechanism to either hide
+// host latencies between the pair of the custom-calls or more accurately
+// identify the def-use relationship of the two calls (typically PerformX is
+// scheduled right after all of its producers have been scheduled and
+// PerformXDone is scheduled right before its first consumer.)
+HloInstructionSequence PostprocessorToScheduleAsEarlyOrLateAsPossible(
+    const HloInstructionSequence& input) {
+  std::vector<HloInstruction*> earliest_scheduled;
+  {
+    absl::flat_hash_set<HloInstruction*> scheduled;
+    auto is_scheduled = [&](const HloInstruction* instr) -> bool {
+      return scheduled.contains(instr);
+    };
+    auto add_to_schedule = [&](HloInstruction* instr) {
+      earliest_scheduled.push_back(instr);
+      scheduled.insert(instr);
+    };
+    for (HloInstruction* instr : input.instructions()) {
+      if (is_scheduled(instr)) {
+        continue;
+      }
+
+      add_to_schedule(instr);
+
+      // Schedule any successor that should be scheduled as early as possible if
+      // all of its producers and control_predecessors have been scheduled.
+      for (HloInstruction* user : instr->users()) {
+        if (ShouldScheduleSuccessor(*user, is_scheduled)) {
+          add_to_schedule(user);
+        }
+      }
+      for (HloInstruction* successor : instr->control_successors()) {
+        if (ShouldScheduleSuccessor(*successor, is_scheduled)) {
+          add_to_schedule(successor);
+        }
+      }
+    }
+  }
+
+  std::deque<HloInstruction*> latest_scheduled;
+  {
+    absl::flat_hash_set<HloInstruction*> scheduled;
+    auto is_scheduled = [&](const HloInstruction* instr) -> bool {
+      return scheduled.contains(instr);
+    };
+    auto add_to_schedule = [&](HloInstruction* instr) {
+      latest_scheduled.push_front(instr);
+      scheduled.insert(instr);
+    };
+    for (auto it = earliest_scheduled.rbegin(); it != earliest_scheduled.rend();
+         it++) {
+      if (is_scheduled(*it)) {
+        continue;
+      }
+
+      add_to_schedule(*it);
+
+      // Schedule any predecessor that should be scheduled as late as possible
+      // if all of its users and control_successors have been scheduled.
+      for (HloInstruction* operand : (*it)->operands()) {
+        if (ShouldSchedulePredecessor(*operand, is_scheduled)) {
+          add_to_schedule(operand);
+        }
+      }
+      for (HloInstruction* predecessor : (*it)->control_predecessors()) {
+        if (ShouldSchedulePredecessor(*predecessor, is_scheduled)) {
+          add_to_schedule(predecessor);
+        }
+      }
+    }
+  }
+
+  HloInstructionSequence result;
+  absl::c_for_each(latest_scheduled,
+                   [&](HloInstruction* i) { result.push_back(i); });
+  return result;
+}
+
 }  // end namespace
 
 GpuHloSchedule::GpuHloSchedule() {}
 
 /* static */
 StatusOr<std::unique_ptr<GpuHloSchedule>> GpuHloSchedule::Build(
-    const HloModule& module, const StreamAssignment& stream_assignment,
+    HloModule* module, const StreamAssignment& stream_assignment,
     int64 pointer_size) {
   std::unique_ptr<GpuHloSchedule> schedule(new GpuHloSchedule);
 
   // Initialize thunk_launch_order_, the total order of thunk launches.
-  const HloComputation* entry_computation = module.entry_computation();
+  HloComputation* entry_computation = module->entry_computation();
   if (stream_assignment.StreamCount() == 1) {
     // All kernels are launched on a single stream, so there's no loss of
     // concurrency by optimizing for minimal memory usage.
     TF_ASSIGN_OR_RETURN(
-        HloInstructionSequence sequence,
-        ScheduleComputation(
-            *entry_computation, [pointer_size](const BufferValue& buffer) {
+        HloSchedule sequences,
+        ScheduleModule(
+            module,
+            [pointer_size](const BufferValue& buffer) {
               return ShapeUtil::ByteSizeOf(buffer.shape(), pointer_size);
-            }));
-    schedule->thunk_launch_order_ = sequence.instructions();
+            },
+            ComputationSchedulerToModuleScheduler(
+                DefaultMemoryScheduler,
+                PostprocessorToScheduleAsEarlyOrLateAsPossible)));
+    schedule->thunk_launch_order_ =
+        sequences.sequence(entry_computation).instructions();
+    schedule->hlo_ordering_ =
+        absl::make_unique<SequentialHloOrdering>(sequences);
   } else {
     // BFS tends to increase concurrency, but also increases memory usage.
     BFSLaunchOrder(entry_computation, &schedule->thunk_launch_order_);
+    schedule->hlo_ordering_ = absl::make_unique<GpuHloOrdering>(
+        module, stream_assignment, schedule->thunk_launch_order_);
   }
-
-  schedule->hlo_ordering_ = absl::make_unique<GpuHloOrdering>(
-      &module, stream_assignment, schedule->thunk_launch_order_);
 
   return std::move(schedule);
 }

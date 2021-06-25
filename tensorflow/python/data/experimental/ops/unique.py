@@ -17,12 +17,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.python.data.ops import dataset_ops
-from tensorflow.python.framework import dtypes
-from tensorflow.python.ops import gen_experimental_dataset_ops
+from tensorflow.python.util import deprecation
 from tensorflow.python.util.tf_export import tf_export
 
 
+@deprecation.deprecated(None, "Use `tf.data.Dataset.unique(...)")
 @tf_export("data.experimental.unique")
 def unique():
   """Creates a `Dataset` from another `Dataset`, discarding duplicates.
@@ -43,37 +42,6 @@ def unique():
   """
 
   def _apply_fn(dataset):
-    return _UniqueDataset(dataset)
+    return dataset.unique()
 
   return _apply_fn
-
-
-class _UniqueDataset(dataset_ops.UnaryDataset):
-  """A `Dataset` contains the unique elements from its input."""
-
-  def __init__(self, input_dataset):
-    """See `unique()` for details."""
-    super(_UniqueDataset, self).__init__(input_dataset)
-    self._input_dataset = input_dataset
-    if input_dataset.output_types not in (dtypes.int32, dtypes.int64,
-                                          dtypes.string):
-      raise TypeError(
-          "`tf.data.experimental.unique()` only supports inputs with a single "
-          "`tf.int32`, `tf.int64`, or `tf.string` component.")
-
-  def _as_variant_tensor(self):
-    return gen_experimental_dataset_ops.experimental_unique_dataset(
-        self._input_dataset._as_variant_tensor(),  # pylint: disable=protected-access
-        **dataset_ops.flat_structure(self))
-
-  @property
-  def output_classes(self):
-    return self._input_dataset.output_classes
-
-  @property
-  def output_shapes(self):
-    return self._input_dataset.output_shapes
-
-  @property
-  def output_types(self):
-    return self._input_dataset.output_types

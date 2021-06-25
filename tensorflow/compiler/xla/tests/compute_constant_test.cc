@@ -69,7 +69,7 @@ class ComputeConstantTest : public ::testing::Test {
     LOG(FATAL) << "invalid client_type value";
   }
 
-  StatusOr<Literal> ComputeConstantLiteral(Client* client, const XlaOp& operand,
+  StatusOr<Literal> ComputeConstantLiteral(Client* client, const XlaOp operand,
                                            XlaBuilder* builder,
                                            Layout* output_layout = nullptr) {
     TF_ASSIGN_OR_RETURN(auto subgraph, builder->BuildConstantSubGraph(operand));
@@ -79,14 +79,14 @@ class ComputeConstantTest : public ::testing::Test {
   }
 
   template <class Scalar>
-  StatusOr<Scalar> ComputeConstantScalar(Client* client, const XlaOp& operand,
+  StatusOr<Scalar> ComputeConstantScalar(Client* client, const XlaOp operand,
                                          XlaBuilder* builder) {
     TF_ASSIGN_OR_RETURN(auto literal, ComputeConstantLiteral(client, operand,
                                                              builder, nullptr));
     return literal.Get<Scalar>({});
   }
 
-  bool IsConstant(const XlaOp& operand, XlaBuilder* builder) {
+  bool IsConstant(const XlaOp operand, XlaBuilder* builder) {
     StatusOr<bool> result = builder->IsConstant(operand);
     EXPECT_TRUE(result.ok()) << result.status();
     return result.ok() ? result.ValueOrDie() : false;
@@ -151,19 +151,35 @@ TEST_F(ComputeConstantTest, DirectParamMissing) {
   }
 }
 
-TEST_F(ComputeConstantTest, IndirectParamMissing) {
+TEST_F(ComputeConstantTest, GetDimensionSize) {
   for (ClientType client_type : client_types) {
     Client* client = ClientOrDie(platform_, client_type);
     XlaBuilder b(TestName());
-    auto computation =
-        Add(ConstantR0<float>(&b, 1.0f),
-            Parameter(&b, 0, ShapeUtil::MakeShape(F32, {}), "param"));
-    EXPECT_FALSE(IsConstant(computation, &b));
+    auto add =
+        Add(ConstantR1<float>(&b, {1.0f}), ConstantR1<float>(&b, {1.0f}));
+    auto get_dimension_size = GetDimensionSize(add, 0);
+    EXPECT_TRUE(IsConstant(get_dimension_size, &b));
 
-    auto value = ComputeConstantScalar<float>(client, computation, &b);
-    EXPECT_TRUE(
-        absl::StrContains(value.status().ToString(), "depends on a parameter"))
-        << value.status();
+    TF_ASSERT_OK_AND_ASSIGN(auto value, ComputeConstantScalar<int32>(
+                                            client, get_dimension_size, &b));
+    EXPECT_EQ(value, 1);
+  }
+}
+
+TEST_F(ComputeConstantTest, MultipleGetDimensionSize) {
+  for (ClientType client_type : client_types) {
+    Client* client = ClientOrDie(platform_, client_type);
+    XlaBuilder b(TestName());
+    auto add =
+        Add(ConstantR2<float>(&b, {{1.0f}}), ConstantR2<float>(&b, {{1.0f}}));
+    auto get_dimension_size = GetDimensionSize(add, 0);
+    auto get_dimension_size_2 = GetDimensionSize(add, 0);
+    auto add_2 = Add(get_dimension_size, get_dimension_size_2);
+    EXPECT_TRUE(IsConstant(add_2, &b));
+
+    TF_ASSERT_OK_AND_ASSIGN(auto value,
+                            ComputeConstantScalar<int32>(client, add_2, &b));
+    EXPECT_EQ(value, 2);
   }
 }
 

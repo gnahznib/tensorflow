@@ -16,21 +16,19 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_COMMON_RUNTIME_LOWER_WHILE_OP_H_
 #define TENSORFLOW_CORE_COMMON_RUNTIME_LOWER_WHILE_OP_H_
 
-#include "tensorflow/core/common_runtime/optimization_registry.h"
 #include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {
 
-// Rewrite While ops to use lower level control flow primitives instead.
-class LowerWhileOpPass : public GraphOptimizationPass {
- public:
-  Status Run(const GraphOptimizationPassOptions& options) override;
+class Graph;
+class Node;
+class FunctionLibraryDefinition;
 
- private:
-  // Rewrite the given While node `n` in graph `g` to use the lower level
-  // primitives Enter, Exit, Switch, Merge and NextIteration.
-  Status RewriteNode(Node* n, Graph* g);
-};
+// Replaces While node `n` with its lowered form that uses Enter, Exit, Switch,
+// Merge, NextIteration and LoopCond nodes.
+Status RewriteWhileNode(Node* n, Graph* g,
+                        const FunctionLibraryDefinition* flib_def,
+                        bool keep_node_fetchable);
 
 }  // namespace tensorflow
 

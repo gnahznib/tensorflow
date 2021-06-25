@@ -12,23 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Layers that operate regularization via the addition of noise.
-"""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Layers that operate regularization via the addition of noise."""
 
 import numpy as np
 
-from tensorflow.python.keras import backend as K
+from tensorflow.python.keras import backend
 from tensorflow.python.keras.engine.base_layer import Layer
 from tensorflow.python.keras.utils import tf_utils
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
-from tensorflow.python.util.tf_export import tf_export
+from tensorflow.python.util.tf_export import keras_export
 
 
-@tf_export('keras.layers.GaussianNoise')
+@keras_export('keras.layers.GaussianNoise')
 class GaussianNoise(Layer):
   """Apply additive zero-centered Gaussian noise.
 
@@ -39,16 +35,21 @@ class GaussianNoise(Layer):
 
   As it is a regularization layer, it is only active at training time.
 
-  Arguments:
-      stddev: float, standard deviation of the noise distribution.
+  Args:
+    stddev: Float, standard deviation of the noise distribution.
+
+  Call arguments:
+    inputs: Input tensor (of any rank).
+    training: Python boolean indicating whether the layer should behave in
+      training mode (adding noise) or in inference mode (doing nothing).
 
   Input shape:
-      Arbitrary. Use the keyword argument `input_shape`
-      (tuple of integers, does not include the samples axis)
-      when using this layer as the first layer in a model.
+    Arbitrary. Use the keyword argument `input_shape`
+    (tuple of integers, does not include the samples axis)
+    when using this layer as the first layer in a model.
 
   Output shape:
-      Same shape as input.
+    Same shape as input.
   """
 
   def __init__(self, stddev, **kwargs):
@@ -59,10 +60,13 @@ class GaussianNoise(Layer):
   def call(self, inputs, training=None):
 
     def noised():
-      return inputs + K.random_normal(
-          shape=array_ops.shape(inputs), mean=0., stddev=self.stddev)
+      return inputs + backend.random_normal(
+          shape=array_ops.shape(inputs),
+          mean=0.,
+          stddev=self.stddev,
+          dtype=inputs.dtype)
 
-    return K.in_train_phase(noised, inputs, training=training)
+    return backend.in_train_phase(noised, inputs, training=training)
 
   def get_config(self):
     config = {'stddev': self.stddev}
@@ -74,25 +78,29 @@ class GaussianNoise(Layer):
     return input_shape
 
 
-@tf_export('keras.layers.GaussianDropout')
+@keras_export('keras.layers.GaussianDropout')
 class GaussianDropout(Layer):
   """Apply multiplicative 1-centered Gaussian noise.
 
   As it is a regularization layer, it is only active at training time.
 
-  Arguments:
-      rate: float, drop probability (as with `Dropout`).
-          The multiplicative noise will have
-          standard deviation `sqrt(rate / (1 - rate))`.
+  Args:
+    rate: Float, drop probability (as with `Dropout`).
+      The multiplicative noise will have
+      standard deviation `sqrt(rate / (1 - rate))`.
+
+  Call arguments:
+    inputs: Input tensor (of any rank).
+    training: Python boolean indicating whether the layer should behave in
+      training mode (adding dropout) or in inference mode (doing nothing).
 
   Input shape:
-      Arbitrary. Use the keyword argument `input_shape`
-      (tuple of integers, does not include the samples axis)
-      when using this layer as the first layer in a model.
+    Arbitrary. Use the keyword argument `input_shape`
+    (tuple of integers, does not include the samples axis)
+    when using this layer as the first layer in a model.
 
   Output shape:
-      Same shape as input.
-
+    Same shape as input.
   """
 
   def __init__(self, rate, **kwargs):
@@ -105,10 +113,13 @@ class GaussianDropout(Layer):
 
       def noised():
         stddev = np.sqrt(self.rate / (1.0 - self.rate))
-        return inputs * K.random_normal(
-            shape=array_ops.shape(inputs), mean=1.0, stddev=stddev)
+        return inputs * backend.random_normal(
+            shape=array_ops.shape(inputs),
+            mean=1.0,
+            stddev=stddev,
+            dtype=inputs.dtype)
 
-      return K.in_train_phase(noised, inputs, training=training)
+      return backend.in_train_phase(noised, inputs, training=training)
     return inputs
 
   def get_config(self):
@@ -121,7 +132,7 @@ class GaussianDropout(Layer):
     return input_shape
 
 
-@tf_export('keras.layers.AlphaDropout')
+@keras_export('keras.layers.AlphaDropout')
 class AlphaDropout(Layer):
   """Applies Alpha Dropout to the input.
 
@@ -131,20 +142,24 @@ class AlphaDropout(Layer):
   Alpha Dropout fits well to Scaled Exponential Linear Units
   by randomly setting activations to the negative saturation value.
 
-  Arguments:
-      rate: float, drop probability (as with `Dropout`).
-          The multiplicative noise will have
-          standard deviation `sqrt(rate / (1 - rate))`.
-      seed: A Python integer to use as random seed.
+  Args:
+    rate: float, drop probability (as with `Dropout`).
+      The multiplicative noise will have
+      standard deviation `sqrt(rate / (1 - rate))`.
+    seed: A Python integer to use as random seed.
+
+  Call arguments:
+    inputs: Input tensor (of any rank).
+    training: Python boolean indicating whether the layer should behave in
+      training mode (adding dropout) or in inference mode (doing nothing).
 
   Input shape:
-      Arbitrary. Use the keyword argument `input_shape`
-      (tuple of integers, does not include the samples axis)
-      when using this layer as the first layer in a model.
+    Arbitrary. Use the keyword argument `input_shape`
+    (tuple of integers, does not include the samples axis)
+    when using this layer as the first layer in a model.
 
   Output shape:
-      Same shape as input.
-
+    Same shape as input.
   """
 
   def __init__(self, rate, noise_shape=None, seed=None, **kwargs):
@@ -167,8 +182,8 @@ class AlphaDropout(Layer):
         alpha_p = -alpha * scale
 
         kept_idx = math_ops.greater_equal(
-            K.random_uniform(noise_shape, seed=seed), rate)
-        kept_idx = math_ops.cast(kept_idx, K.floatx())
+            backend.random_uniform(noise_shape, seed=seed), rate)
+        kept_idx = math_ops.cast(kept_idx, inputs.dtype)
 
         # Get affine transformation params
         a = ((1 - rate) * (1 + rate * alpha_p**2))**-0.5
@@ -180,7 +195,7 @@ class AlphaDropout(Layer):
         # Do affine transformation
         return a * x + b
 
-      return K.in_train_phase(dropped_inputs, inputs, training=training)
+      return backend.in_train_phase(dropped_inputs, inputs, training=training)
     return inputs
 
   def get_config(self):

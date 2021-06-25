@@ -31,7 +31,8 @@ message HloProfilePrinterData {
     // Metrics computed by HloCostAnalysis.
     float flop_count = 4;
     float transcendental_count = 5;
-    float bytes_accessed = 6;
+    reserved 6;  // bytes_accessed used to erroneously be a float
+    int64 bytes_accessed = 9;
     float optimal_seconds = 7;
 
     // The index into the profile counters array for the HloInstruction
@@ -57,4 +58,10 @@ message HloProfilePrinterData {
 
   // The size of the profile counters array we will pretty-print.
   int64 profile_counters_size = 2;
+
+  // Maps extra metric name to the index into the profile counters array.
+  map<string, int64> extra_metrics = 3;
+
+  // Name of the entry computation.
+  string entry_computation = 4;
 }

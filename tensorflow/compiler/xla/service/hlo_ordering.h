@@ -26,6 +26,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_dataflow_analysis.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
+#include "tensorflow/compiler/xla/service/hlo_reachability.h"
 #include "tensorflow/compiler/xla/service/hlo_schedule.h"
 #include "tensorflow/compiler/xla/service/hlo_value.h"
 #include "tensorflow/compiler/xla/types.h"
@@ -36,9 +37,32 @@ namespace xla {
 // determine live range overlap of HLO instruction output buffers.
 class HloOrdering {
  public:
-  HloOrdering(const HloModule* module)
+  explicit HloOrdering(const HloModule* module)
       : module_(module), call_graph_(CallGraph::Build(module)) {}
   virtual ~HloOrdering() = default;
+
+  // Specify the ordering constraints between a pair of instructions a and b.
+  enum class ExecutionConstraint {
+    // Indicate a and b are the same instruction;
+    kIsSame,
+    // Indicate a runs before b starts;
+    kRunBeforeStart,
+    // Indicate a runs before b ends but after b starts, e.g., when b is a
+    // conditional or while loop;
+    kRunBeforeEnd,
+    // Only one of a or b runs each time their common ancestor is evaluated,
+    // and a is in an earlier branch than b.
+    kRunExclusiveBefore,
+    // Only one of a or b runs each time, and a is in a later branch than b.
+    kRunExclusiveAfter,
+    // Indicate a runs after b ends.
+    kRunAfter,
+    // An order cannot be detrermined as a and b do not have a common ancestor.
+    kUnordered,
+  };
+  // Return the execution constraint between a and b.
+  HloOrdering::ExecutionConstraint GetExecutionConstraint(
+      const HloInstruction* a, const HloInstruction* b) const;
 
   // Returns true if instruction 'a' executes before instruction 'b'. This is
   // not reflexive, that is, an instruction does not execute before itself.
@@ -50,8 +74,9 @@ class HloOrdering {
 
   // Returns whether the given use is before the given value definition under
   // the given ordering.
-  bool UseIsBeforeValueDefinition(const HloUse& use, const HloValue& value,
-                                  const HloDataflowAnalysis& dataflow) const;
+  bool UsesBeforeValueDefinition(absl::Span<const HloUse* const> uses,
+                                 const HloValue& value,
+                                 const HloDataflowAnalysis& dataflow) const;
   // Returns whether the given values interfere. Two values interfere if they
   // may both be simultaneously live.
   bool MayInterfere(const HloValue& a, const HloValue& b,
@@ -64,7 +89,7 @@ class HloOrdering {
 
   // Returns the sequential instruction order for the given computation, or
   // nullptr if the computation does not have a sequential ordering.
-  virtual const std::vector<const HloInstruction*>* SequentialOrder(
+  virtual const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const = 0;
 
   // Return the call graph of the module used to compute ordering.
@@ -96,7 +121,7 @@ class PredecessorHloOrdering : public HloOrdering {
 
   // Returns nullptr indicating the computation does not have a sequential
   // ordering.
-  const std::vector<const HloInstruction*>* SequentialOrder(
+  const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const override {
     return nullptr;
   }
@@ -180,12 +205,12 @@ class DependencyHloOrdering : public PredecessorHloOrdering {
 // interference is reduced relative to DependencyHloOrdering.
 class SequentialHloOrdering : public HloOrdering {
  public:
-  SequentialHloOrdering(const HloSchedule& schedule);
-  SequentialHloOrdering(HloSchedule&& schedule);
+  explicit SequentialHloOrdering(const HloSchedule& schedule);
+  explicit SequentialHloOrdering(HloSchedule&& schedule);
   ~SequentialHloOrdering() override = default;
 
   // Returns the sequential instruction order for the given computation.
-  const std::vector<const HloInstruction*>* SequentialOrder(
+  const HloInstructionSequence* SequentialOrder(
       const HloComputation& computation) const override;
 
   string ToString() const override;

@@ -35,11 +35,13 @@ class HloModuleGroup {
   explicit HloModuleGroup(absl::string_view name) : name_(name) {}
 
   // Construct a module group containing a single module.
-  HloModuleGroup(absl::string_view name, std::unique_ptr<HloModule> module);
+  explicit HloModuleGroup(std::unique_ptr<HloModule> module);
 
   // Construct a module group containing any number of modules.
   HloModuleGroup(absl::string_view name,
                  absl::Span<std::unique_ptr<HloModule>> modules);
+  HloModuleGroup(absl::string_view name,
+                 std::vector<std::unique_ptr<HloModule>>&& modules);
 
   // Returns the modules contained in the group.
   const std::vector<HloModule*>& modules() const { return module_ptrs_; }
@@ -50,18 +52,38 @@ class HloModuleGroup {
   // Add a module to the back of vector of modules in the group.
   void push_back(std::unique_ptr<HloModule> module);
 
+  // Replaces the existing module at the given index with the given module. The
+  // existing module is discarded.
+  void ReplaceModule(int index, std::unique_ptr<HloModule> module);
+
   // Moves all modules from the group into the returned vector. After this
   // method runs, the module group will be empty.
   std::vector<std::unique_ptr<HloModule>> ConsumeModules();
 
   string name() const { return name_; }
+
   string ToString() const;
+
+  // Deallocate removed instructions in each module.
+  void Cleanup() {
+    for (auto& module : modules_) {
+      module->Cleanup();
+    }
+  }
+
+  uint64 Hash() const;
 
   // Serialize the module group to/from a proto.
   HloModuleGroupProto ToProto() const;
   static StatusOr<HloModuleGroup> CreateFromProto(
       const HloModuleGroupProto& proto,
       absl::Span<const HloModuleConfig> module_configs);
+
+  // Returns the number of modules in the module group.
+  int size() const { return modules_.size(); }
+
+  // Returns true if there are no modules in the module group.
+  bool empty() const { return modules_.empty(); }
 
  private:
   string name_;

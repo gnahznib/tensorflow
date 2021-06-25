@@ -26,19 +26,28 @@ namespace tensorflow {
 
 namespace internal {
 
-// Device-specific naive implementation for tile.
-template <typename Device, typename T>
-void TileSimple(const Device& d, Tensor* out, const Tensor& in);
+// Device-specific naive implementation for Tile.
+
+template <typename T>
+void TileSimple(const Eigen::ThreadPoolDevice& d, Tensor* out,
+                const Tensor& in);
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+template <typename T>
+void TileSimple(const Eigen::GpuDevice& d, Tensor* out, const Tensor& in);
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 template <typename Device, typename T, typename Tmultiples, int NDIM>
 void TileUsingEigen(const Device& d, Tensor* out, const Tensor& in,
-                    const gtl::ArraySlice<Tmultiples>& broadcast_array) {
+                    const gtl::ArraySlice<Tmultiples> broadcast_array) {
   auto x = in.tensor<T, NDIM>();
   auto y = out->tensor<T, NDIM>();
 
+  bool use_32bit = y.size() < Eigen::NumTraits<int>::highest();
+
   Eigen::array<Tmultiples, NDIM> b;
   for (int i = 0; i < NDIM; ++i) b[i] = broadcast_array[i];
-  if (Eigen::internal::is_same<Device, Eigen::GpuDevice>::value) {
+  if (use_32bit && Eigen::internal::is_same<Device, Eigen::GpuDevice>::value) {
     // Use 32bit indexing to speed up the computations
     To32Bit(y).device(d) = To32Bit(x).broadcast(b);
   } else {
@@ -48,7 +57,7 @@ void TileUsingEigen(const Device& d, Tensor* out, const Tensor& in,
 
 template <typename Device, typename T, typename Tmultiples>
 void TileUsingEigen(const Device& d, Tensor* out, const Tensor& in,
-                    const gtl::ArraySlice<Tmultiples>&) {
+                    const gtl::ArraySlice<Tmultiples>) {
   auto x = in.tensor<T, 0>();
   auto y = out->tensor<T, 0>();
   // In the scalar case we simply copy the input.
@@ -97,7 +106,7 @@ struct Tile {
                                                            broadcast_array);
         break;
       default:
-        internal::TileSimple<Device, T>(d, out, in);
+        internal::TileSimple<T>(d, out, in);
         break;
     }
   }

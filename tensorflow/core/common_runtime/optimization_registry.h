@@ -22,6 +22,7 @@ limitations under the License.
 #include <map>
 #include <vector>
 
+#include "tensorflow/core/common_runtime/composite_device.h"
 #include "tensorflow/core/common_runtime/device_set.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/graph/costmodel.h"
@@ -35,6 +36,7 @@ struct SessionOptions;
 // as a key into a state dictionary if it wants to keep state across
 // calls.
 struct GraphOptimizationPassOptions {
+  // Filled in by DirectSession for PRE_PLACEMENT optimizations. Can be empty.
   string session_handle;
   const SessionOptions* session_options = nullptr;
   const CostModel* cost_model = nullptr;
@@ -47,6 +49,11 @@ struct GraphOptimizationPassOptions {
   // workers.
   const DeviceSet* device_set = nullptr;  // Not owned.
 
+  // Maps from a CompositeDevice name to a list of underlying physical
+  // devices.
+  const std::vector<CompositeDevice*>* composite_devices =
+      nullptr;  // Not owned.
+
   // The graph to optimize, for optimization passes that run before
   // partitioning. Null for post-partitioning passes.
   // An optimization pass may replace *graph with a new graph object.
@@ -57,6 +64,16 @@ struct GraphOptimizationPassOptions {
   // Null for pre-partitioning passes.
   std::unordered_map<string, std::unique_ptr<Graph>>* partition_graphs =
       nullptr;
+
+  // Indicator of whether or not the graph was derived from a function.
+  bool is_function_graph = false;
+  // Set when is_function_graph is true. The default device where the function
+  // runs. If nullptr, it runs on the local host.
+  const Device* default_function_device = nullptr;
+  // Set when is_function_graph is true. The function where the graph was
+  // derived. `graph` doesn't contain all the information in the function_def,
+  // e.g. function attributes.
+  const FunctionDef* function_def = nullptr;
 };
 
 // Optimization passes are implemented by inheriting from
@@ -69,7 +86,7 @@ class GraphOptimizationPass {
   string name() const { return name_; }
 
  private:
-  // The name of the opitimization pass, which is the same as the inherited
+  // The name of the optimization pass, which is the same as the inherited
   // class name.
   string name_;
 };
@@ -93,6 +110,10 @@ class OptimizationPassRegistry {
   // Add an optimization pass to the registry.
   void Register(Grouping grouping, int phase,
                 std::unique_ptr<GraphOptimizationPass> pass);
+
+  const std::map<Grouping, GraphOptimizationPasses>& groups() {
+    return groups_;
+  }
 
   // Run all passes in grouping, ordered by phase, with the same
   // options.

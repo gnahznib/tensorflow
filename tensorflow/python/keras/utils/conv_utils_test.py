@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for conv_utils."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
 
 from absl.testing import parameterized
@@ -50,6 +46,114 @@ input_shapes = [
     (3, 2, 2, 4, 4),
     (1, 2, 3, 4, 7, 2),
 ]
+
+
+class TestBasicConvUtilsTest(test.TestCase):
+
+  def test_convert_data_format(self):
+    self.assertEqual('NCDHW', conv_utils.convert_data_format(
+        'channels_first', 5))
+    self.assertEqual('NCHW', conv_utils.convert_data_format(
+        'channels_first', 4))
+    self.assertEqual('NCW', conv_utils.convert_data_format('channels_first', 3))
+    self.assertEqual('NHWC', conv_utils.convert_data_format('channels_last', 4))
+    self.assertEqual('NWC', conv_utils.convert_data_format('channels_last', 3))
+    self.assertEqual('NDHWC', conv_utils.convert_data_format(
+        'channels_last', 5))
+
+    with self.assertRaises(ValueError):
+      conv_utils.convert_data_format('invalid', 2)
+
+  def test_normalize_tuple(self):
+    self.assertEqual((2, 2, 2),
+                     conv_utils.normalize_tuple(2, n=3, name='strides'))
+    self.assertEqual((2, 1, 2),
+                     conv_utils.normalize_tuple((2, 1, 2), n=3, name='strides'))
+
+    with self.assertRaises(ValueError):
+      conv_utils.normalize_tuple((2, 1), n=3, name='strides')
+
+    with self.assertRaises(ValueError):
+      conv_utils.normalize_tuple(None, n=3, name='strides')
+
+  def test_normalize_data_format(self):
+    self.assertEqual('channels_last',
+                     conv_utils.normalize_data_format('Channels_Last'))
+    self.assertEqual('channels_first',
+                     conv_utils.normalize_data_format('CHANNELS_FIRST'))
+
+    with self.assertRaises(ValueError):
+      conv_utils.normalize_data_format('invalid')
+
+  def test_normalize_padding(self):
+    self.assertEqual('same', conv_utils.normalize_padding('SAME'))
+    self.assertEqual('valid', conv_utils.normalize_padding('VALID'))
+
+    with self.assertRaises(ValueError):
+      conv_utils.normalize_padding('invalid')
+
+  def test_conv_output_length(self):
+    self.assertEqual(4, conv_utils.conv_output_length(4, 2, 'same', 1, 1))
+    self.assertEqual(2, conv_utils.conv_output_length(4, 2, 'same', 2, 1))
+    self.assertEqual(3, conv_utils.conv_output_length(4, 2, 'valid', 1, 1))
+    self.assertEqual(2, conv_utils.conv_output_length(4, 2, 'valid', 2, 1))
+    self.assertEqual(5, conv_utils.conv_output_length(4, 2, 'full', 1, 1))
+    self.assertEqual(3, conv_utils.conv_output_length(4, 2, 'full', 2, 1))
+    self.assertEqual(2, conv_utils.conv_output_length(5, 2, 'valid', 2, 2))
+
+  def test_conv_input_length(self):
+    self.assertEqual(3, conv_utils.conv_input_length(4, 2, 'same', 1))
+    self.assertEqual(2, conv_utils.conv_input_length(2, 2, 'same', 2))
+    self.assertEqual(4, conv_utils.conv_input_length(3, 2, 'valid', 1))
+    self.assertEqual(4, conv_utils.conv_input_length(2, 2, 'valid', 2))
+    self.assertEqual(3, conv_utils.conv_input_length(4, 2, 'full', 1))
+    self.assertEqual(4, conv_utils.conv_input_length(3, 2, 'full', 2))
+
+  def test_deconv_output_length(self):
+    self.assertEqual(4, conv_utils.deconv_output_length(4, 2, 'same', stride=1))
+    self.assertEqual(8, conv_utils.deconv_output_length(4, 2, 'same', stride=2))
+    self.assertEqual(5, conv_utils.deconv_output_length(
+        4, 2, 'valid', stride=1))
+    self.assertEqual(8, conv_utils.deconv_output_length(
+        4, 2, 'valid', stride=2))
+    self.assertEqual(3, conv_utils.deconv_output_length(4, 2, 'full', stride=1))
+    self.assertEqual(6, conv_utils.deconv_output_length(4, 2, 'full', stride=2))
+    self.assertEqual(
+        5,
+        conv_utils.deconv_output_length(
+            4, 2, 'same', output_padding=2, stride=1))
+    self.assertEqual(
+        7,
+        conv_utils.deconv_output_length(
+            4, 2, 'same', output_padding=1, stride=2))
+    self.assertEqual(
+        7,
+        conv_utils.deconv_output_length(
+            4, 2, 'valid', output_padding=2, stride=1))
+    self.assertEqual(
+        9,
+        conv_utils.deconv_output_length(
+            4, 2, 'valid', output_padding=1, stride=2))
+    self.assertEqual(
+        5,
+        conv_utils.deconv_output_length(
+            4, 2, 'full', output_padding=2, stride=1))
+    self.assertEqual(
+        7,
+        conv_utils.deconv_output_length(
+            4, 2, 'full', output_padding=1, stride=2))
+    self.assertEqual(
+        5,
+        conv_utils.deconv_output_length(
+            4, 2, 'same', output_padding=1, stride=1, dilation=2))
+    self.assertEqual(
+        12,
+        conv_utils.deconv_output_length(
+            4, 2, 'valid', output_padding=2, stride=2, dilation=3))
+    self.assertEqual(
+        6,
+        conv_utils.deconv_output_length(
+            4, 2, 'full', output_padding=2, stride=2, dilation=3))
 
 
 @parameterized.parameters(input_shapes)
@@ -98,7 +202,7 @@ class TestConvUtils(test.TestCase, parameterized.TestCase):
     output_shape = _get_const_output_shape(input_shape, dim=1)
 
     mask = np.zeros(input_shape + output_shape, np.bool)
-    if all(d > 0 for d in mask.shape):
+    if all(d > 0 for d in mask.shape):  # pylint: disable=not-an-iterable
       mask[(0,) * len(output_shape)] = True
 
     self.assertAllEqual(
@@ -119,7 +223,7 @@ class TestConvUtils(test.TestCase, parameterized.TestCase):
     output_shape = _get_const_output_shape(input_shape, dim=2)
 
     mask = np.zeros(input_shape + output_shape, np.bool)
-    if all(d > 0 for d in mask.shape):
+    if all(d > 0 for d in mask.shape):  # pylint: disable=not-an-iterable
       for in_position in itertools.product(*[[0, d - 1] for d in input_shape]):
         out_position = tuple([min(p, 1) for p in in_position])
         mask[in_position + out_position] = True

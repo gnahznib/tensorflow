@@ -23,6 +23,7 @@ limitations under the License.
 #include <deque>
 
 #include "absl/types/span.h"
+#include "tensorflow/compiler/xla/shape.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -116,6 +117,8 @@ class XfeedManager {
   XfeedQueueManager infeed_ = {"infeed"};
   XfeedQueueManager outfeed_ = {"outfeed"};
 };
+
+int64 GetByteSizeRequirement(const Shape& shape, int64 pointer_size);
 
 }  // namespace runtime
 }  // namespace cpu

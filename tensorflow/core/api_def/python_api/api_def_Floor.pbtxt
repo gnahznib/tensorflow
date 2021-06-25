@@ -1,10 +1,4 @@
 op {
   graph_op_name: "Floor"
-  endpoint {
-    name: "math.floor"
-  }
-  endpoint {
-    name: "floor"
-    deprecated: true
-  }
+  visibility: HIDDEN
 }

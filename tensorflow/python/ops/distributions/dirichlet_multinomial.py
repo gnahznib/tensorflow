@@ -51,7 +51,7 @@ fractional components, and such that
 with `self.concentration` and `self.total_count`."""
 
 
-@tf_export("distributions.DirichletMultinomial")
+@tf_export(v1=["distributions.DirichletMultinomial"])
 class DirichletMultinomial(distribution.Distribution):
   """Dirichlet-Multinomial compound distribution.
 
@@ -314,9 +314,11 @@ class DirichletMultinomial(distribution.Distribution):
       """)
   def _covariance(self):
     x = self._variance_scale_term() * self._mean()
+    # pylint: disable=invalid-unary-operand-type
     return array_ops.matrix_set_diag(
-        -math_ops.matmul(x[..., array_ops.newaxis],
-                         x[..., array_ops.newaxis, :]),  # outer prod
+        -math_ops.matmul(
+            x[..., array_ops.newaxis],
+            x[..., array_ops.newaxis, :]),  # outer prod
         self._variance())
 
   def _variance(self):

@@ -48,7 +48,7 @@ class InfeedTest : public ClientLibraryTestBase {
     ASSERT_IS_OK(client_->TransferToInfeed(literal));
     XlaBuilder builder(TestName());
     Infeed(&builder, literal.shape());
-    if (ShapeUtil::IsTuple(literal.shape())) {
+    if (literal.shape().IsTuple()) {
       // TODO(b/30609564): Use ComputeAndCompareLiteral instead.
       ComputeAndCompareTuple(&builder, literal, {});
     } else {
@@ -273,7 +273,7 @@ TEST_F(InfeedTest, DISABLED_TwoInfeedsInTotalOrder) {
 
   // Wait for a second to ensure testing that the execution is waiting on the
   // Infeed data, and send the rest Infeed data of shape Tuple(F32[3], PRED).
-  sleep(1);
+  tensorflow::Env::Default()->SleepForMicroseconds(1000000);
   ASSERT_IS_OK(client_->TransferToInfeed(
       LiteralUtil::MakeTupleFromSlices({LiteralUtil::CreateR1<float>({1, 2, 3}),
                                         LiteralUtil::CreateR0<bool>(true)})));
